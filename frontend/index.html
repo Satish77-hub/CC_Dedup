@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Dedupe Mini Drive</title>
+    <script src="https://unpkg.com/aws-amplify@5.3.11/dist/aws-amplify.min.js"></script>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; max-width: 800px; margin: 40px auto; background-color: #f4f7f6; color: #333; }
+        h1, h2, h3 { color: #333; text-align: center; margin-bottom: 25px; }
+        form { background-color: #fff; padding: 25px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1); margin-bottom: 20px; max-width: 450px; margin-left: auto; margin-right: auto; }
+        input[type="email"], input[type="password"], input[type="text"], input[type="file"] { display: block; width: 95%; padding: 12px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; font-size: 1em; }
+        button { background-color: #007bff; color: white; padding: 12px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; width: 100%; margin-top: 10px; }
+        button:hover { background-color: #0056b3; }
+        p { text-align: center; margin-top: 15px; }
+        a { color: #007bff; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        .hidden { display: none; }
+        #fileList { max-width: 600px; margin: 20px auto; padding-left: 0; }
+        #fileList li { list-style-type: none; background: #fff; padding: 10px 15px; border-radius: 4px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        #fileList button { background-color: #6c757d; width: auto; padding: 5px 10px; font-size: 0.9em; margin-left: 10px; }
+        #fileList button:hover { background-color: #5a6268; }
+        #logoutBtn { width: auto; padding: 8px 15px; font-size: 0.9em; float: right; margin-bottom: 20px; background-color: #dc3545; }
+        #logoutBtn:hover { background-color: #c82333; }
+        #admin-section { margin-top: 40px; border-top: 1px solid #ccc; padding-top: 20px; }
+        #metrics-summary { margin-bottom: 20px; background: #e9ecef; padding: 15px; border-radius: 5px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+        #metrics-summary p { text-align: left; margin: 5px 0; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); background-color: #fff; }
+        th, td { border: 1px solid #ddd; padding: 10px; text-align: left; }
+        th { background-color: #f8f9fa; font-weight: bold; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+    </style>
+</head>
+<body>
+
+    <div id="auth-container">
+        <div id="loginView"><h1>Login</h1><form id="loginForm"><input type="email" id="login-email" placeholder="Email" required><input type="password" id="login-password" placeholder="Password" required><button type="submit">Login</button><p>New user? <a href="#" id="showRegisterLink">Register here</a></p></form></div>
+        <div id="registerView" class="hidden"><h1>Register</h1><form id="registerForm"><input type="email" id="reg-email" placeholder="Email" required><input type="password" id="reg-password" placeholder="Password" required><button type="submit">Register</button><p>Already have an account? <a href="#" id="showLoginLink">Login here</a></p></form><div id="confirmForm" class="hidden"><h2>Confirm Email</h2><input type="text" id="confirmation-code" placeholder="Confirmation Code" required><button id="confirmBtn">Confirm</button></div></div>
+    </div>
+
+    <div id="dashboard" class="hidden">
+        <button id="logoutBtn">Logout</button><h1>Upload File</h1><form id="uploadForm"><input type="file" id="file-input" required><button type="submit">Upload</button></form><progress id="progress" value="0" max="100" style="width: 100%; display: none; max-width: 450px; margin: 10px auto;"></progress><h2>My Files</h2><ul id="fileList"></ul>
+        <div id="admin-section" class="hidden"><h2>Admin Dashboard</h2><div id="metrics-summary"><p>Loading summary...</p></div><h3>User Storage Overview</h3><table><thead><tr><th>User Email</th><th>Storage Used (Original)</th><th>Status</th><th>Joined</th></tr></thead><tbody id="user-table-body"><tr><td colspan="4">Loading users...</td></tr></tbody></table></div>
+    </div>
+
+    <script>
+    // FIX: Wrap all JavaScript in a function that runs after the page and Amplify script are loaded
+    document.addEventListener('DOMContentLoaded', () => {
+
+        // --- PASTE YOUR DEPLOYMENT OUTPUTS HERE ---
+        const API_URL = 'https://d7op7d8641.execute-api.ap-south-1.amazonaws.com/prod';
+        const USER_POOL_ID = 'ap-south-1_h2ZEsVWx3';
+        const USER_POOL_CLIENT_ID = '7knfl04t432cqe4jfh117v2qjk';
+        // ------------------------------------------
+        
+        const { Auth, API } = Amplify;
+
+        Amplify.configure({
+            Auth: {
+                userPoolId: USER_POOL_ID,
+                userPoolWebClientId: USER_POOL_CLIENT_ID,
+            },
+            API: {
+                endpoints: [{
+                    name: "DedupeAPI",
+                    endpoint: API_URL,
+                    custom_header: async () => {
+                        try {
+                             return { Authorization: `Bearer ${(await Auth.currentSession()).getIdToken().getJwtToken()}` }
+                        } catch (e) { return {} }
+                    }
+                }]
+            }
+        });
+
+        const loginView = document.getElementById('loginView');
+        const registerView = document.getElementById('registerView');
+        const showRegisterLink = document.getElementById('showRegisterLink');
+        const showLoginLink = document.getElementById('showLoginLink');
+
+        showRegisterLink.addEventListener('click', (e) => { e.preventDefault(); loginView.classList.add('hidden'); registerView.classList.remove('hidden'); });
+        showLoginLink.addEventListener('click', (e) => { e.preventDefault(); registerView.classList.add('hidden'); loginView.classList.remove('hidden'); });
+
+        document.getElementById('registerForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('reg-email').value;
+            const password = document.getElementById('reg-password').value;
+            try {
+                await Auth.signUp({ username: email, password });
+                alert('Registration successful! Please check your email for a confirmation code.');
+                document.getElementById('confirmForm').classList.remove('hidden');
+            } catch (error) { alert(`Registration failed: ${error.message}`); }
+        });
+
+        document.getElementById('confirmBtn').addEventListener('click', async () => {
+            const email = document.getElementById('reg-email').value;
+            const code = document.getElementById('confirmation-code').value;
+            try {
+                await Auth.confirmSignUp(email, code);
+                alert('Email confirmed! You can now log in.');
+                registerView.classList.add('hidden');
+                loginView.classList.remove('hidden');
+            } catch (error) { alert(`Confirmation failed: ${error.message}`); }
+        });
+
+        document.getElementById('loginForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const email = document.getElementById('login-email').value;
+            const password = document.getElementById('login-password').value;
+            try {
+                await Auth.signIn(email, password);
+                showDashboard();
+            } catch (error) { alert(`Login failed: ${error.message}`); }
+        });
+
+        document.getElementById('logoutBtn').addEventListener('click', async () => {
+            await Auth.signOut();
+            window.location.reload();
+        });
+
+        document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const file = document.getElementById('file-input').files[0];
+            try {
+                const fileDataBase64 = await toBase64(file);
+                await API.post('DedupeAPI', '/upload', { 
+                    body: { 
+                        fileName: file.name, 
+                        fileData: fileDataBase64 
+                    } 
+                });
+                alert('File uploaded successfully!');
+                fetchFiles();
+            } catch (error) {
+                console.error('Upload Error:', error);
+                alert(`Upload failed: ${error.message || JSON.stringify(error)}`);
+            }
+        });
+
+        async function fetchFiles() {
+            try {
+                const files = await API.get('DedupeAPI', '/files', {});
+                const fileList = document.getElementById('fileList');
+                fileList.innerHTML = '';
+                 if (!files || files.length === 0) {
+                     fileList.innerHTML = '<li>No files uploaded yet.</li>';
+                     return;
+                 }
+                files.forEach(file => {
+                    const li = document.createElement('li');
+                    const fileName = file.fileName || 'Unknown File';
+                    const fileVersion = file.version || 'N/A';
+                    const fileId = file.fileId;
+                    li.innerHTML = `<span>${fileName} (v${fileVersion})</span>
+                                  <div><button onclick="window.downloadFile('${fileId}')">Download</button></div>`;
+                    fileList.appendChild(li);
+                });
+            } catch (error) {
+                console.error('Error fetching files:', error);
+                 document.getElementById('fileList').innerHTML = '<li>Error loading files.</li>';
+            }
+        }
+
+        window.downloadFile = async function(fileId) {
+            alert('Download functionality is not fully implemented in this example.');
+        }
+
+        async function fetchAdminMetrics() {
+            try {
+                const session = await Auth.currentSession();
+                const groups = session.getIdToken().getPayload()['cognito:groups'];
+
+                if (groups && groups.includes('Admins')) {
+                    const metricsData = await API.get('DedupeAPI', '/admin/metrics', {});
+                    
+                    const metricsDiv = document.getElementById('metrics-summary');
+                    metricsDiv.innerHTML = `<p><strong>Total Files:</strong> ${metricsData.summary.totalFiles}</p><p><strong>Total Original Size:</strong> ${metricsData.summary.totalOriginalMB} MB</p><p><strong>Total Stored Size (Deduplicated):</strong> ${metricsData.summary.totalStoredMB} MB</p><p><strong>Total Space Saved:</strong> ${metricsData.summary.savedMB} MB</p>`;
+                    
+                    const userTableBody = document.getElementById('user-table-body');
+                    userTableBody.innerHTML = '';
+                    if (!metricsData.users || metricsData.users.length === 0) {
+                         userTableBody.innerHTML = '<tr><td colspan="4">No users found.</td></tr>';
+                    } else {
+                        metricsData.users.forEach(user => {
+                            const row = userTableBody.insertRow();
+                            row.insertCell(0).textContent = user.email || user.userId;
+                            row.insertCell(1).textContent = user.totalOriginalSizeMB + ' MB';
+                            row.insertCell(2).textContent = user.status || 'N/A';
+                            row.insertCell(3).textContent = user.createdDate ? new Date(user.createdDate).toLocaleDateString() : 'N/A';
+                        });
+                    }
+                    document.getElementById('admin-section').classList.remove('hidden');
+                } else { document.getElementById('admin-section').classList.add('hidden'); }
+            } catch (error) {
+                console.error('Could not fetch admin metrics:', error);
+                 document.getElementById('admin-section').classList.add('hidden');
+            }
+        }
+
+        async function showDashboard() {
+            document.getElementById('auth-container').classList.add('hidden');
+            document.getElementById('dashboard').classList.remove('hidden');
+            await fetchFiles();
+            await fetchAdminMetrics();
+        }
+
+        const toBase64 = file => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = reject;
+        });
+
+        // Initial check to see if a user is already logged in
+        (async () => {
+            try {
+                await Auth.currentAuthenticatedUser();
+                showDashboard();
+            } catch (e) {
+                // Not logged in, do nothing, login form is visible by default
+            }
+        })();
+    });
+    </script>
+</body>
+</html>

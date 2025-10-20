@@ -1,0 +1,209 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Deduplication Mini Drive - Deploys S3, DynamoDB, Cognito, and Lambda functions.
+
+Globals:
+  Function:
+    Runtime: nodejs18.x
+    Timeout: 60
+    MemorySize: 1024
+    Environment:
+      Variables:
+        FILES_TABLE_NAME: "metadata"
+        CHUNKS_TABLE_NAME: "chunks"
+        S3_BUCKET_NAME: "deduplication-bucket-cloudproject"
+        COGNITO_CLIENT_ID: !Ref UserPoolClient
+        COGNITO_USER_POOL_ID: !Ref UserPool
+
+Resources:
+  # --- 1. STORAGE & DATABASE ---
+  ChunksBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "deduplication-bucket-cloudproject"
+
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "metadata"
+      AttributeDefinitions:
+        - {AttributeName: "userId", AttributeType: "S"}
+        - {AttributeName: "fileId", AttributeType: "S"}
+      KeySchema:
+        - {AttributeName: "userId", KeyType: "HASH"}
+        - {AttributeName: "fileId", KeyType: "RANGE"}
+      BillingMode: PAY_PER_REQUEST
+
+  ChunksTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "chunks"
+      AttributeDefinitions:
+        - {AttributeName: "chunkHash", AttributeType: "S"}
+      KeySchema:
+        - {AttributeName: "chunkHash", KeyType: "HASH"}
+      BillingMode: PAY_PER_REQUEST
+
+  # --- 2. API GATEWAY & AUTHENTICATION ---
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      Cors: "'*'"
+      Auth:
+        DefaultAuthorizer: CognitoAuthorizer
+        Authorizers:
+          CognitoAuthorizer:
+            UserPoolArn: !GetAtt UserPool.Arn
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: DedupUserPool
+      AutoVerifiedAttributes: [email]
+      Policies:
+        PasswordPolicy: {MinimumLength: 8}
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref UserPool
+      GenerateSecret: false
+
+  # --- 3. ALL LAMBDA FUNCTIONS ---
+  UploadLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: upload.handler
+      Policies:
+        - S3WritePolicy: { BucketName: "deduplication-bucket-cloudproject" }
+        - DynamoDBCrudPolicy: { TableName: "metadata" }
+        - DynamoDBCrudPolicy: { TableName: "chunks" }
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /upload
+            Method: post
+            RestApiId: !Ref ApiGateway
+
+  DownloadLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: download.handler
+      Policies:
+        - S3CrudPolicy: { BucketName: "deduplication-bucket-cloudproject" }
+        - DynamoDBReadPolicy: { TableName: "metadata" }
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /download/{fileId}
+            Method: get
+            RestApiId: !Ref ApiGateway
+
+  ListFilesLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: listFiles.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: "metadata" }
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /files
+            Method: get
+            RestApiId: !Ref ApiGateway
+
+  ShareLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: share.handler
+      Policies:
+        - DynamoDBCrudPolicy: { TableName: "metadata" }
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /share/{fileId}
+            Method: post
+            RestApiId: !Ref ApiGateway
+
+  AdminMetricsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: adminMetrics.handler
+      Policies:
+        - DynamoDBReadPolicy: { TableName: "metadata" }
+        - DynamoDBReadPolicy: { TableName: "chunks" }
+        - CloudWatchPutMetricPolicy: {}
+        - Statement:
+            - Effect: Allow
+              Action: [cognito-idp:ListUsers]
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /admin/metrics
+            Method: get
+            RestApiId: !Ref ApiGateway
+
+  RegisterLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: register.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [cognito-idp:SignUp]
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /register
+            Method: post
+            RestApiId: !Ref ApiGateway
+            Auth:
+              Authorizer: NONE
+
+  LoginLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambda/
+      Handler: login.handler
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: [cognito-idp:InitiateAuth]
+              Resource: !GetAtt UserPool.Arn
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            Path: /login
+            Method: post
+            RestApiId: !Ref ApiGateway
+            Auth:
+              Authorizer: NONE
+
+# --- 4. OUTPUTS ---
+Outputs:
+  ApiUrl:
+    Description: "The URL for the API Gateway endpoint"
+    Value: !Sub "https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/prod"
+  UserPoolId:
+    Description: "The ID of the Cognito User Pool"
+    Value: !Ref UserPool
+  UserPoolClientId:
+    Description: "The ID for the Cognito User Pool Client"
+    Value: !Ref UserPoolClient
