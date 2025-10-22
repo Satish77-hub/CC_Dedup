@@ -1,8 +1,8 @@
 // lambda/adminMetrics.js
-
 const { DynamoDBClient, ScanCommand } = require('@aws-sdk/client-dynamodb');
 const { CognitoIdentityProviderClient, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { CloudWatchClient, PutMetricDataCommand } = require('@aws-sdk/client-cloudwatch');
+const { ok, err } = require('./cors');
 
 const dynamoDB = new DynamoDBClient({});
 const cognito = new CognitoIdentityProviderClient({});
@@ -16,14 +16,11 @@ exports.handler = async (event) => {
     // 1. Authorization Check
     const userGroups = event.requestContext.authorizer?.claims['cognito:groups'];
     if (!userGroups || !userGroups.includes('Admins')) {
-        return {
-            statusCode: 403,
-            body: JSON.stringify({ message: 'Unauthorized. Admin access required.' }),
-        };
+        return err(403, { message: 'Unauthorized. Admin access required.' });
     }
 
     try {
-        // 2. Fetch data from Cognito and DynamoDB concurrently
+        // 2. Fetch data concurrently
         const usersPromise = cognito.send(new ListUsersCommand({ UserPoolId: USER_POOL_ID }));
         const filesDataPromise = dynamoDB.send(new ScanCommand({ TableName: FILES_TABLE }));
         const chunksDataPromise = dynamoDB.send(new ScanCommand({ TableName: CHUNKS_TABLE }));
@@ -63,7 +60,7 @@ exports.handler = async (event) => {
         const totalStoredSize = chunksData.Items.reduce((sum, item) => sum + (parseInt(item.size?.N) || 0), 0);
         const totalSavedSize = Math.max(0, totalOriginalSizeAllUsers - totalStoredSize);
 
-        // 5. Send Metric to CloudWatch
+        // 5. Send Metric to CloudWatch (Optional)
         try {
             await cw.send(new PutMetricDataCommand({
                 MetricData: [{ MetricName: 'StorageSavedBytes', Value: totalSavedSize, Unit: 'Bytes' }],
@@ -93,16 +90,10 @@ exports.handler = async (event) => {
             }
         };
 
-        return {
-            statusCode: 200,
-            body: JSON.stringify(responsePayload)
-        };
+        return ok(responsePayload);
 
     } catch (error) {
         console.error("Error calculating admin metrics:", error);
-        return {
-            statusCode: 500,
-            body: JSON.stringify({ message: "Internal server error calculating metrics.", error: error.message })
-        };
+        return err(500, { message: "Internal server error calculating metrics.", error: error.message });
     }
 };

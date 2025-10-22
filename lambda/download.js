@@ -1,32 +1,33 @@
+// lambda/download.js
 const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { DynamoDBClient, GetItemCommand } = require('@aws-sdk/client-dynamodb');
+const { unmarshall } = require("@aws-sdk/util-dynamodb");
 const zlib = require('zlib');
+const { ok, err } = require('./cors');
 
 const s3 = new S3Client({});
 const dynamoDB = new DynamoDBClient({});
-
 const FILES_TABLE = process.env.FILES_TABLE_NAME;
 const BUCKET_NAME = process.env.S3_BUCKET_NAME;
 
 exports.handler = async (event) => {
     try {
-        const fileId = event.pathParameters.fileId;
+        const fileId = event.pathParameters?.fileId;
         const userId = event.requestContext.authorizer.claims.sub;
+    if (!userId) return err(401, { message: 'Unauthorized' });
+    if (!fileId) return err(400, { message: 'Missing fileId' });
 
-        // Note: For shared files, this query needs to be more complex.
-        // This basic version only allows the owner to download.
         const getParams = {
             TableName: FILES_TABLE,
             Key: { userId: { S: userId }, fileId: { S: fileId } }
         };
 
         const { Item } = await dynamoDB.send(new GetItemCommand(getParams));
-        if (!Item) {
-            return { statusCode: 404, body: 'File not found or you do not have permission.' };
-        }
+        if (!Item) return err(404, { message: 'File not found or you do not have permission.' });
 
-        const chunkHashes = Item.chunkHashes.L.map(h => h.S);
+        const fileItem = unmarshall(Item);
+        const chunkHashes = fileItem.chunkHashes || [];
         let fileBuffer = Buffer.alloc(0);
 
         for (const hash of chunkHashes) {
@@ -37,16 +38,21 @@ exports.handler = async (event) => {
             fileBuffer = Buffer.concat([fileBuffer, decompressedChunk]);
         }
 
-        // Re-upload the reconstructed file to a temporary location to generate a download link
+        // Re-upload the reconstructed file to a temporary location
         const tempKey = `temp-downloads/${userId}/${fileId}`;
-        await s3.send(new PutObjectCommand({ Bucket: BUCKET_NAME, Key: tempKey, Body: fileBuffer }));
+        await s3.send(new PutObjectCommand({ 
+            Bucket: BUCKET_NAME, 
+            Key: tempKey, 
+            Body: fileBuffer, 
+            ContentType: 'application/octet-stream' 
+        }));
 
         // Generate a pre-signed URL for the temporary file
-        const signedUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET_NAME, Key: tempKey }), { expiresIn: 60 }); // Link expires in 60 seconds
+        const signedUrl = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET_NAME, Key: tempKey }), { expiresIn: 60 }); 
 
-        return { statusCode: 200, body: signedUrl };
+        return ok({ downloadUrl: signedUrl });
     } catch (error) {
         console.error("Download error:", error);
-        return { statusCode: 500, body: JSON.stringify({ message: "Error generating download link." }) };
+        return err(500, { message: "Error generating download link.", error: error.message });
     }
 };
